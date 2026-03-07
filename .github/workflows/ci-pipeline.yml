@@ -1,0 +1,105 @@
+name: CI Pipeline with AI Error Analysis
+
+# Trigger on every push to any branch
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    name: Run pipeline and analyze any failures
+    runs-on: ubuntu-latest
+
+    # The last step creates a GitHub issue, so the job needs write access
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      # ------------------------------------------------------------------ #
+      # 1. Checkout source code                                              #
+      # ------------------------------------------------------------------ #
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------ #
+      # 2. Set up Python runtime                                             #
+      # ------------------------------------------------------------------ #
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ------------------------------------------------------------------ #
+      # 3. Initialise a fresh error log for this run                        #
+      # ------------------------------------------------------------------ #
+      - name: Initialise pipeline error log
+        run: |
+          echo "=== Pipeline Error Log ===" > pipeline_errors.log
+          echo "Repository : ${{ github.repository }}" >> pipeline_errors.log
+          echo "Run ID     : ${{ github.run_id }}"      >> pipeline_errors.log
+          echo "Commit     : ${{ github.sha }}"         >> pipeline_errors.log
+          echo "Triggered  : $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> pipeline_errors.log
+          echo "========================================" >> pipeline_errors.log
+          echo "" >> pipeline_errors.log
+
+      # ------------------------------------------------------------------ #
+      # 4. Step 1 — Simulate an Out-of-Memory (OOM) error                  #
+      #    continue-on-error: true  so the pipeline keeps running even      #
+      #    after this step fails.                                            #
+      # ------------------------------------------------------------------ #
+      - name: 'Step 1: Data Loader — simulate OOM error'
+        id: oom_step
+        continue-on-error: true
+        run: |
+          echo "--- Step 1: Data Loader (simulate_oom.py) ---" >> pipeline_errors.log
+          # stdout and stderr are captured by tee into the log file.
+          # GitHub Actions runs bash with -eo pipefail, so when python exits
+          # with a non-zero code the pipe returns non-zero and the step fails.
+          # continue-on-error: true is required to proceed to the next step.
+          python scripts/simulate_oom.py 2>&1 | tee -a pipeline_errors.log
+
+      # ------------------------------------------------------------------ #
+      # 5. Step 2 — Simulate a TypeError with mixed data types              #
+      # ------------------------------------------------------------------ #
+      - name: 'Step 2: Sensor Processor — simulate TypeError'
+        id: type_error_step
+        continue-on-error: true
+        run: |
+          echo "--- Step 2: Sensor Processor (simulate_type_error.py) ---" >> pipeline_errors.log
+          python scripts/simulate_type_error.py 2>&1 | tee -a pipeline_errors.log
+
+      # ------------------------------------------------------------------ #
+      # 6. Show the aggregated log so it appears in the Actions UI          #
+      # ------------------------------------------------------------------ #
+      - name: Display aggregated pipeline error log
+        if: always()
+        run: |
+          echo "======= pipeline_errors.log ======="
+          cat pipeline_errors.log
+
+      # ------------------------------------------------------------------ #
+      # 7. Final step — AI Error Analysis                                   #
+      #    Uses the custom local action defined in                          #
+      #    .github/actions/ai-error-analyzer/                              #
+      #    Reads the error log, calls Claude, and opens a GitHub issue.     #
+      # ------------------------------------------------------------------ #
+      - name: 'Final Step: Analyse errors with Claude and create GitHub issue'
+        if: always()
+        id: ai_analysis
+        uses: ./.github/actions/ai-error-analyzer
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          log-file: pipeline_errors.log
+          claude-model: claude-3-5-sonnet-20241022
+
+      # ------------------------------------------------------------------ #
+      # 8. Print the created issue URL                                       #
+      # ------------------------------------------------------------------ #
+      - name: Print issue URL
+        if: always() && steps.ai_analysis.outputs.issue-url != ''
+        run: |
+          echo "GitHub issue created: ${{ steps.ai_analysis.outputs.issue-url }}"

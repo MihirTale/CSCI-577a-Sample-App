@@ -1,0 +1,45 @@
+name: 'AI Error Analyzer'
+description: >
+  Reads CI pipeline error logs, sends them to Claude (Anthropic) with a
+  structured prompt, and opens a GitHub issue with the AI-generated analysis.
+
+inputs:
+  anthropic-api-key:
+    description: 'Anthropic API key used to call Claude models'
+    required: true
+  github-token:
+    description: 'GitHub token with issues:write permission'
+    required: true
+  log-file:
+    description: 'Path to the aggregated pipeline error log'
+    required: false
+    default: 'pipeline_errors.log'
+  claude-model:
+    description: 'Claude model ID to use for analysis'
+    required: false
+    default: 'claude-3-5-sonnet-20241022'
+
+outputs:
+  issue-url:
+    description: 'URL of the created GitHub issue (empty if no errors were found)'
+    value: ${{ steps.analyze.outputs.issue-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Python dependencies
+      shell: bash
+      run: pip install --quiet "anthropic==0.84.0" "requests==2.32.5"
+
+    - name: Analyze errors and create GitHub issue
+      id: analyze
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        COMMIT_SHA: ${{ github.sha }}
+        LOG_FILE: ${{ inputs.log-file }}
+        CLAUDE_MODEL: ${{ inputs.claude-model }}
+      run: python "${{ github.action_path }}/analyze_and_create_issue.py"

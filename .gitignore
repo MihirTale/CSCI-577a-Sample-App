@@ -1,0 +1,8 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local error log produced during CI runs
+pipeline_errors.log
