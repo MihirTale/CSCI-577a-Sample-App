@@ -252,7 +252,7 @@ def main() -> None:
     if not model:
         # Default to Gemini
         provider = "gemini"
-        model = "gemini-2.0-flash"
+        model = "gemini-3-flash-preview"
     elif "claude" in model.lower():
         provider = "claude"
     else:
