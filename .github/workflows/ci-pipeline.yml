@@ -6,6 +6,15 @@ on:
     branches:
       - '**'
   workflow_dispatch:
+    inputs:
+      ai-provider:
+        description: 'AI provider for error analysis ("gemini" or "claude")'
+        required: false
+        default: 'gemini'
+      ai-model:
+        description: 'Model ID (leave blank for provider default)'
+        required: false
+        default: ''
 
 jobs:
   run-pipeline:
@@ -16,6 +25,13 @@ jobs:
     permissions:
       contents: read
       issues: write
+
+    # ------------------------------------------------------------------ #
+    # Resolve AI provider/model from workflow_dispatch inputs or defaults #
+    # ------------------------------------------------------------------ #
+    env:
+      AI_PROVIDER: ${{ github.event.inputs.ai-provider || 'gemini' }}
+      AI_MODEL_OVERRIDE: ${{ github.event.inputs.ai-model || '' }}
 
     steps:
       # ------------------------------------------------------------------ #
@@ -46,23 +62,21 @@ jobs:
           echo "" >> pipeline_errors.log
 
       # ------------------------------------------------------------------ #
-      # 4. Step 1 — Simulate an Out-of-Memory (OOM) error                  #
-      #    continue-on-error: true  so the pipeline keeps running even      #
-      #    after this step fails.                                            #
+      # 4. Step 1 — Out-of-Memory error                                     #
+      #    Simulates a data-loader that reads a multi-GB CSV entirely into  #
+      #    memory, exhausting available RAM on the runner.                  #
       # ------------------------------------------------------------------ #
       - name: 'Step 1: Data Loader — simulate OOM error'
         id: oom_step
         continue-on-error: true
         run: |
           echo "--- Step 1: Data Loader (simulate_oom.py) ---" >> pipeline_errors.log
-          # stdout and stderr are captured by tee into the log file.
-          # GitHub Actions runs bash with -eo pipefail, so when python exits
-          # with a non-zero code the pipe returns non-zero and the step fails.
-          # continue-on-error: true is required to proceed to the next step.
           python scripts/simulate_oom.py 2>&1 | tee -a pipeline_errors.log
 
       # ------------------------------------------------------------------ #
-      # 5. Step 2 — Simulate a TypeError with mixed data types              #
+      # 5. Step 2 — TypeError with mixed data types                         #
+      #    Simulates an IoT sensor processor that receives string sentinel  #
+      #    values ('N/A', 'ERROR', 'OFFLINE') alongside floats.             #
       # ------------------------------------------------------------------ #
       - name: 'Step 2: Sensor Processor — simulate TypeError'
         id: type_error_step
@@ -72,7 +86,50 @@ jobs:
           python scripts/simulate_type_error.py 2>&1 | tee -a pipeline_errors.log
 
       # ------------------------------------------------------------------ #
-      # 6. Show the aggregated log so it appears in the Actions UI          #
+      # 6. Step 3 — Missing environment variable / secret                   #
+      #    Simulates a model-serving startup that expects secrets to be     #
+      #    pre-configured in the CI secrets store.  The variables are       #
+      #    intentionally not set so the step fails with a KeyError, which   #
+      #    mirrors one of the most common real-life CI/CD mistakes.         #
+      # ------------------------------------------------------------------ #
+      - name: 'Step 3: Model Server — simulate missing env vars'
+        id: missing_env_step
+        continue-on-error: true
+        run: |
+          echo "--- Step 3: Model Server (simulate_missing_env.py) ---" >> pipeline_errors.log
+          # The required env vars (MODEL_SERVING_ENDPOINT, MODEL_API_SECRET_KEY,
+          # INFERENCE_TIMEOUT_MS, FEATURE_STORE_DSN) are deliberately NOT set
+          # here to trigger the failure.
+          python scripts/simulate_missing_env.py 2>&1 | tee -a pipeline_errors.log
+
+      # ------------------------------------------------------------------ #
+      # 7. Step 4 — Dependency / version conflict                           #
+      #    Simulates an ImportError caused by two packages in               #
+      #    requirements.txt that require mutually exclusive versions of     #
+      #    scipy (scikit-learn vs imbalanced-learn upper-bound clash).      #
+      # ------------------------------------------------------------------ #
+      - name: 'Step 4: ML Trainer — simulate dependency conflict'
+        id: dep_conflict_step
+        continue-on-error: true
+        run: |
+          echo "--- Step 4: ML Trainer (simulate_dep_conflict.py) ---" >> pipeline_errors.log
+          python scripts/simulate_dep_conflict.py 2>&1 | tee -a pipeline_errors.log
+
+      # ------------------------------------------------------------------ #
+      # 8. Step 5 — Flaky integration test (race condition)                 #
+      #    Simulates a non-deterministic assertion failure that occurs when  #
+      #    the CI worker pool (2 threads) processes async requests in a     #
+      #    different order than on a developer's machine (8 threads).       #
+      # ------------------------------------------------------------------ #
+      - name: 'Step 5: Integration Tests — simulate flaky test failure'
+        id: flaky_test_step
+        continue-on-error: true
+        run: |
+          echo "--- Step 5: Integration Tests (simulate_flaky_test.py) ---" >> pipeline_errors.log
+          python scripts/simulate_flaky_test.py 2>&1 | tee -a pipeline_errors.log
+
+      # ------------------------------------------------------------------ #
+      # 9. Show the aggregated log so it appears in the Actions UI          #
       # ------------------------------------------------------------------ #
       - name: Display aggregated pipeline error log
         if: always()
@@ -81,23 +138,26 @@ jobs:
           cat pipeline_errors.log
 
       # ------------------------------------------------------------------ #
-      # 7. Final step — AI Error Analysis                                   #
-      #    Uses the custom local action defined in                          #
-      #    .github/actions/ai-error-analyzer/                              #
-      #    Reads the error log, calls Claude, and opens a GitHub issue.     #
+      # 10. Final step — AI Error Analysis                                  #
+      #     Uses the custom local action.  Reads the error log, calls the  #
+      #     selected AI model, and opens a GitHub issue.                    #
       # ------------------------------------------------------------------ #
-      - name: 'Final Step: Analyse errors with Claude and create GitHub issue'
+      - name: 'Final Step: Analyse errors with AI and create GitHub issue'
         if: always()
         id: ai_analysis
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_PROVIDER: ${{ env.AI_PROVIDER }}
+          AI_MODEL: ${{ env.AI_MODEL_OVERRIDE }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         uses: ./.github/actions/ai-error-analyzer
         with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          ai-provider: ${{ env.AI_PROVIDER }}
+          ai-model: ${{ env.AI_MODEL_OVERRIDE }}
           log-file: pipeline_errors.log
-          claude-model: claude-3-5-sonnet-20241022
 
       # ------------------------------------------------------------------ #
-      # 8. Print the created issue URL                                       #
+      # 11. Print the created issue URL                                     #
       # ------------------------------------------------------------------ #
       - name: Print issue URL
         if: always() && steps.ai_analysis.outputs.issue-url != ''

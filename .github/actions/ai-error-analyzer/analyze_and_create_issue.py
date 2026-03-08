@@ -6,28 +6,28 @@ This script is invoked by the custom GitHub Action
 '.github/actions/ai-error-analyzer'.  It:
 
   1. Reads the aggregated pipeline error log produced by previous steps.
-  2. Builds a detailed prompt and sends it to Claude (Anthropic) via the
-     official Python SDK.
+  2. Builds a detailed prompt and sends it to either Google Gemini (default)
+     or Anthropic Claude, depending on AI_PROVIDER.
   3. Parses the model response to extract an issue title and body.
   4. Creates a GitHub issue in the same repository using the GitHub REST API.
 
 Required environment variables
 -------------------------------
-  ANTHROPIC_API_KEY  – Anthropic secret key
-  GH_TOKEN           – GitHub token with issues:write permission
-  REPO               – '<owner>/<repo>' string (set automatically in Actions)
-  RUN_ID             – GitHub Actions run ID
-  COMMIT_SHA         – HEAD commit SHA
+  AI_API_KEY   – API key for the chosen provider
+  AI_PROVIDER  – 'gemini' (default) or 'claude'
+  AI_MODEL     – model ID (e.g. 'gemini-2.0-flash' or 'claude-3-5-sonnet-20241022')
+  GH_TOKEN     – GitHub token with issues:write permission
+  REPO         – '<owner>/<repo>' string (set automatically in Actions)
+  RUN_ID       – GitHub Actions run ID
+  COMMIT_SHA   – HEAD commit SHA
 
 Optional environment variables
 -------------------------------
-  LOG_FILE           – path to the error log (default: pipeline_errors.log)
-  CLAUDE_MODEL       – Claude model ID to use
-  GITHUB_OUTPUT      – path to the GitHub Actions output file
+  LOG_FILE     – path to the error log (default: pipeline_errors.log)
+  GITHUB_OUTPUT – path to the GitHub Actions output file
 """
 
 import datetime
-import json
 import os
 import sys
 import traceback
@@ -50,7 +50,7 @@ def ensure_labels(repo: str, token: str, labels: list[dict]) -> None:
     Create GitHub issue labels if they do not already exist.
     Failures are logged but do not abort the script.
     """
-    import requests  # imported here to keep top-level imports minimal
+    import requests
 
     for label in labels:
         url = f"https://api.github.com/repos/{repo}/labels"
@@ -70,9 +70,9 @@ def ensure_labels(repo: str, token: str, labels: list[dict]) -> None:
 
 def build_prompt(error_logs: str, repo: str, run_id: str, commit_sha: str) -> str:
     """
-    Return the custom prompt that is sent to Claude.
+    Return the prompt sent to the AI model.
 
-    The prompt asks Claude to act as a senior engineer, analyse the logs,
+    The prompt asks the model to act as a senior engineer, analyse the logs,
     and respond in a structured format that maps directly to a GitHub issue.
     """
     short_sha = commit_sha[:7] if commit_sha and commit_sha != "unknown" else "unknown"
@@ -145,9 +145,25 @@ Do **not** add any text outside the markdown document.
 """
 
 
+# ---------------------------------------------------------------------------
+# AI provider calls
+# ---------------------------------------------------------------------------
+
+def call_gemini(prompt: str, model: str, api_key: str) -> str:
+    """Call the Google Gemini API and return the text response."""
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+    )
+    return response.text
+
+
 def call_claude(prompt: str, model: str, api_key: str) -> str:
-    """Call the Anthropic Messages API and return the text response."""
-    import anthropic  # imported here so the script can be imported in tests
+    """Call the Anthropic Claude API and return the text response."""
+    import anthropic
 
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
@@ -158,9 +174,27 @@ def call_claude(prompt: str, model: str, api_key: str) -> str:
     return message.content[0].text
 
 
+def call_ai(prompt: str, provider: str, model: str, api_key: str) -> str:
+    """Route the request to the appropriate AI provider."""
+    provider = provider.lower().strip()
+    if provider == "gemini":
+        return call_gemini(prompt, model, api_key)
+    elif provider == "claude":
+        return call_claude(prompt, model, api_key)
+    else:
+        raise ValueError(
+            f"Unknown AI_PROVIDER: {provider!r}. "
+            "Supported values are 'gemini' (default) and 'claude'."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GitHub helpers
+# ---------------------------------------------------------------------------
+
 def parse_response(response_text: str, run_id: str) -> tuple[str, str]:
     """
-    Extract (title, body) from Claude's markdown response.
+    Extract (title, body) from the model's markdown response.
 
     Expects the first line to be '# <title>'.  Falls back gracefully.
     """
@@ -207,19 +241,30 @@ def main() -> None:
     print("[INFO] ============================================================")
 
     # --- collect environment variables ---
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
-    repo = os.environ.get("REPO", "")
-    run_id = os.environ.get("RUN_ID", "unknown")
+    api_key    = os.environ.get("AI_API_KEY", "")
+    provider   = os.environ.get("AI_PROVIDER", "gemini")
+    model      = os.environ.get("AI_MODEL", "").strip()
+    gh_token   = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    repo       = os.environ.get("REPO", "")
+    run_id     = os.environ.get("RUN_ID", "unknown")
     commit_sha = os.environ.get("COMMIT_SHA", "unknown")
-    log_file = os.environ.get("LOG_FILE", "pipeline_errors.log")
-    model = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+    
+    # Set default model based on provider if not specified
+    if not model:
+        if provider == "claude":
+            model = "claude-3-5-sonnet-20241022"
+        else:  # default to gemini
+            model = "gemini-2.0-flash"
+    log_file   = os.environ.get("LOG_FILE", "pipeline_errors.log")
     github_output = os.environ.get("GITHUB_OUTPUT", "")
+
+    print(f"[INFO] AI provider : {provider}")
+    print(f"[INFO] AI model    : {model}")
 
     # --- validate required secrets ---
     missing = []
     if not api_key:
-        missing.append("ANTHROPIC_API_KEY")
+        missing.append("AI_API_KEY")
     if not gh_token:
         missing.append("GH_TOKEN / GITHUB_TOKEN")
     if not repo:
@@ -244,17 +289,17 @@ def main() -> None:
 
     print(f"[INFO] Log size: {len(error_logs):,} bytes")
 
-    # --- call Claude ---
-    print(f"[INFO] Sending logs to Claude model: {model}")
+    # --- call AI model ---
+    print(f"[INFO] Sending logs to {provider} model: {model}")
     prompt = build_prompt(error_logs, repo, run_id, commit_sha)
     try:
-        response_text = call_claude(prompt, model, api_key)
+        response_text = call_ai(prompt, provider, model, api_key)
     except Exception as exc:
-        print(f"[ERROR] Claude API call failed: {exc}", file=sys.stderr)
+        print(f"[ERROR] AI API call failed: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 
-    print("[INFO] Received analysis from Claude.")
+    print(f"[INFO] Received analysis from {provider}.")
 
     # --- parse response ---
     title, body = parse_response(response_text, run_id)
@@ -270,6 +315,7 @@ def main() -> None:
         f"| Repository | `{repo}` |\n"
         f"| Run | [#{run_id}](https://github.com/{repo}/actions/runs/{run_id}) |\n"
         f"| Commit | `{short_sha}` |\n"
+        f"| AI provider | `{provider}` |\n"
         f"| AI model | `{model}` |\n"
         f"| Generated | {timestamp} |\n"
     )
@@ -296,7 +342,7 @@ def main() -> None:
 
     issue_url = issue.get("html_url", "")
     issue_number = issue.get("number", "?")
-    print(f"[INFO] ✅ Issue created successfully: #{issue_number}")
+    print(f"[INFO] Issue created successfully: #{issue_number}")
     print(f"[INFO]    {issue_url}")
 
     # Expose the issue URL as a step output
