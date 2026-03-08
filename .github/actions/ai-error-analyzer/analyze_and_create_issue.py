@@ -7,19 +7,19 @@ This script is invoked by the custom GitHub Action
 
   1. Reads the aggregated pipeline error log produced by previous steps.
   2. Builds a detailed prompt and sends it to either Google Gemini (default)
-     or Anthropic Claude, depending on AI_PROVIDER.
+     or Anthropic Claude, depending on the model name.
   3. Parses the model response to extract an issue title and body.
   4. Creates a GitHub issue in the same repository using the GitHub REST API.
 
 Required environment variables
 -------------------------------
-  AI_API_KEY   – API key for the chosen provider
-  AI_PROVIDER  – 'gemini' (default) or 'claude'
-  AI_MODEL     – model ID (e.g. 'gemini-2.0-flash' or 'claude-3-5-sonnet-20241022')
-  GH_TOKEN     – GitHub token with issues:write permission
-  REPO         – '<owner>/<repo>' string (set automatically in Actions)
-  RUN_ID       – GitHub Actions run ID
-  COMMIT_SHA   – HEAD commit SHA
+  AI_API_KEY          – API key for the selected AI provider (set by workflow)
+  AI_MODEL            – model ID (e.g. 'gemini-2.0-flash' or 'claude-3-5-sonnet-20241022')
+                        Leave empty for Gemini default. Provider is inferred from model name.
+  GITHUB_TOKEN        – GitHub token with issues:write permission (automatically provided)
+  REPO                – '<owner>/<repo>' string (set automatically in Actions)
+  RUN_ID              – GitHub Actions run ID
+  COMMIT_SHA          – HEAD commit SHA
 
 Optional environment variables
 -------------------------------
@@ -242,19 +242,21 @@ def main() -> None:
 
     # --- collect environment variables ---
     api_key    = os.environ.get("AI_API_KEY", "")
-    provider   = os.environ.get("AI_PROVIDER", "gemini")
     model      = os.environ.get("AI_MODEL", "").strip()
     gh_token   = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
     repo       = os.environ.get("REPO", "")
     run_id     = os.environ.get("RUN_ID", "unknown")
     commit_sha = os.environ.get("COMMIT_SHA", "unknown")
     
-    # Set default model based on provider if not specified
+    # Infer provider from model name and set defaults
     if not model:
-        if provider == "claude":
-            model = "claude-3-5-sonnet-20241022"
-        else:  # default to gemini
-            model = "gemini-2.0-flash"
+        # Default to Gemini
+        provider = "gemini"
+        model = "gemini-2.0-flash"
+    elif "claude" in model.lower():
+        provider = "claude"
+    else:
+        provider = "gemini"
     log_file   = os.environ.get("LOG_FILE", "pipeline_errors.log")
     github_output = os.environ.get("GITHUB_OUTPUT", "")
 

@@ -5,21 +5,18 @@ description: >
   issue with the AI-generated analysis.
   
   REQUIRED ENVIRONMENT VARIABLES (set from GitHub secrets):
-    - AI_API_KEY: API key for Gemini (GEMINI_API_KEY) or Claude (ANTHROPIC_API_KEY)
-    - GH_TOKEN or GITHUB_TOKEN: GitHub token with issues:write permission
+    - AI_API_KEY: API key for your AI provider (Gemini or Claude)
+    - GITHUB_TOKEN: GitHub token with issues:write permission (automatically provided)
 
 inputs:
-  ai-provider:
-    description: 'AI provider to use: "gemini" (default) or "claude"'
-    required: false
-    default: 'gemini'
   ai-model:
     description: >
       Model ID to use for analysis.
       Gemini default  : gemini-2.0-flash
       Claude example  : claude-3-5-sonnet-20241022
+      Leave empty to use Gemini default.
     required: false
-    default: 'gemini-2.0-flash'
+    default: ''
   log-file:
     description: 'Path to the aggregated pipeline error log'
     required: false
@@ -41,7 +38,6 @@ runs:
       id: analyze
       shell: bash
       env:
-        AI_PROVIDER: ${{ inputs.ai-provider }}
         AI_MODEL: ${{ inputs.ai-model }}
         REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
