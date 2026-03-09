@@ -3,7 +3,7 @@
 CSCI-577a: Sample App which LogLens Agent will monitor.
 
 This repository contains five CI/CD pipelines, each deliberately triggering a different class of real-world error. Each pipeline runs its simulation script, captures the output, and finishes with an AI-powered analysis step that opens a GitHub issue with a root-cause breakdown.
-
+This is a new feature.
 ---
 
 ## Repository Structure
