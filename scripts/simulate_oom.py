@@ -1,43 +1,38 @@
 #!/usr/bin/env python3
 """
 Data Loading Pipeline - Step 1
-Simulates an Out-of-Memory (OOM) error encountered during large dataset processing.
+Triggers a real Out-of-Memory error by attempting to allocate an
+impossibly large NumPy array — the same failure seen in production
+when a data loader reads a multi-gigabyte CSV entirely into RAM
+instead of streaming it in chunks.
 """
 
+import subprocess
 import sys
-import traceback
 
 
-def load_dataset(filename: str) -> list:
-    """
-    Load a large dataset into memory for model training.
+def install(package: str) -> None:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
 
-    In production this reads a multi-GB CSV file entirely into memory,
-    which will exhaust available RAM on the runner.
-    """
+
+def load_dataset(filename: str):
+    import numpy as np
+
     print(f"[INFO] Opening file: {filename}")
     print("[INFO] Estimated file size: 52.4 GB")
-    print("[INFO] Reading rows into memory buffer...")
+    print("[INFO] Allocating in-memory buffer for full dataset load...")
 
-    data = []
-    batch_size = 50_000
+    rows = 10_000_000_000   # 10 billion rows
+    cols = 1_000
+    required_tb = rows * cols * 8 / 1e12
 
-    for batch_num in range(1, 10_000):
-        print(f"[INFO] Loaded batch {batch_num} ({batch_size * batch_num:,} rows so far...)")
+    print(f"[INFO] Requested shape  : ({rows:,} rows × {cols} cols) float64")
+    print(f"[INFO] Required memory  : {required_tb:.0f} TB")
+    print("[INFO] Allocating ...")
 
-        # After a few batches, the process exceeds available memory
-        if batch_num >= 4:
-            raise MemoryError(
-                f"Cannot allocate array of size {batch_size * batch_num * 64:,} bytes.\n"
-                f"  Current process RSS: 6,442,450,944 bytes (6.0 GB)\n"
-                f"  System available memory: 524,288 bytes (512 KB)\n"
-                f"  Requested next allocation: {batch_size * 64:,} bytes\n"
-                "Hint: use --batch-size or stream the file instead of loading it entirely."
-            )
-
-        data.extend([0.0] * batch_size)
-
-    return data
+    # numpy's allocator raises a real MemoryError:
+    # "Unable to allocate X TiB for an array with shape (...) and data type float64"
+    return np.zeros((rows, cols), dtype=np.float64)
 
 
 if __name__ == "__main__":
@@ -49,15 +44,9 @@ if __name__ == "__main__":
     print("[INFO] Source file : training_data_2024_v2.csv")
     print()
 
-    try:
-        dataset = load_dataset("training_data_2024_v2.csv")
-        print(f"[INFO] Successfully loaded {len(dataset):,} rows.")
-        print("[INFO] Step 1 PASSED.")
-    except MemoryError as e:
-        print()
-        print("[ERROR] *** OUT-OF-MEMORY ERROR ***", file=sys.stderr)
-        print(f"[ERROR] {e}", file=sys.stderr)
-        print("[ERROR] Step 1 FAILED: process exhausted available memory.", file=sys.stderr)
-        print("[ERROR] Traceback (most recent call last):", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        sys.exit(1)
+    print("[INFO] Installing numpy ...")
+    install("numpy")
+
+    dataset = load_dataset("training_data_2024_v2.csv")
+    print(f"[INFO] Successfully loaded {dataset.shape[0]:,} rows.")
+    print("[INFO] Step 1 PASSED.")

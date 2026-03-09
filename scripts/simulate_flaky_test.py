@@ -1,101 +1,74 @@
 #!/usr/bin/env python3
 """
 Integration Test Suite - Step 5
-Simulates a flaky test failure caused by a race condition / non-deterministic
-assertion in an asynchronous integration test.
+Triggers a real AssertionError caused by a genuine threading race condition:
+multiple worker threads complete in non-deterministic order (driven by
+varying sleep durations), and the test asserts that results arrive in
+submission order — a requirement the async batch handler cannot satisfy.
 
-In real CI/CD this surfaces when:
-  - Tests share global state or temp files without proper isolation
-  - Async callbacks resolve in a different order on CI than locally
-  - A test asserts on timing (sleep-based synchronisation) that is slower on CI
-  - External service mocks return responses in a different order under load
+This is the same failure seen on CI when the worker-pool size differs from
+local dev, causing requests to complete in a different order than submitted.
 """
 
-import sys
-import traceback
-
-
-# ---------------------------------------------------------------------------
-# Simulated test helpers
-# ---------------------------------------------------------------------------
-
-def fake_sleep(seconds: float) -> None:
-    """Replacement for time.sleep that prints to the log."""
-    print(f"[INFO]   waiting {seconds}s for async callback...")
+import threading
+import time
 
 
 def run_test_model_prediction_order() -> None:
     """
-    Test: predictions returned by the async batch API must arrive in the
-    same order as the input requests.
-
-    On CI the async worker pool is smaller (2 threads vs 8 locally), so
-    requests queued later can complete first, causing the ordering assertion
-    to fail non-deterministically.
+    Spawn one thread per request, each sleeping for a different duration to
+    simulate varying processing times.  Threads append their request ID to a
+    shared list as they finish, so the completion order depends on wall-clock
+    timing — a real race condition.  The assertion then fails because the
+    completion order does not match the submission order.
     """
     print("[INFO] test_model_prediction_order ... ", end="", flush=True)
 
-    input_ids = [f"req-{i:03d}" for i in range(10)]
-    fake_sleep(0.1)
+    input_ids        = [f"req-{i:03d}" for i in range(10)]
+    completion_order = []
+    lock             = threading.Lock()
 
-    # On CI the 2-worker pool processes pairs; req-001 and req-002 are
-    # dispatched together but req-002 (simpler input) finishes before req-001.
-    # The response list arrives out of order.
-    response_ids = [
-        "req-000", "req-002", "req-001",   # <-- req-002 overtook req-001
-        "req-003", "req-004", "req-005",
-        "req-006", "req-007", "req-009", "req-008",  # <-- req-009 overtook req-008
+    # Unequal delays ensure threads finish out of submission order
+    delays = [0.09, 0.01, 0.08, 0.02, 0.07, 0.03, 0.06, 0.04, 0.05, 0.01]
+
+    def process(req_id: str, delay: float) -> None:
+        time.sleep(delay)
+        with lock:
+            completion_order.append(req_id)
+
+    threads = [
+        threading.Thread(target=process, args=(req_id, d))
+        for req_id, d in zip(input_ids, delays)
     ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
-    if response_ids != input_ids:
-        mismatches = [
-            (i, inp, got)
-            for i, (inp, got) in enumerate(zip(input_ids, response_ids))
-            if inp != got
-        ]
-        details = "\n".join(
-            f"    position {i}: expected {inp!r}, got {got!r}"
-            for i, inp, got in mismatches
-        )
-        raise AssertionError(
-            "FAIL\n\n"
-            "  test_model_prediction_order — prediction order mismatch\n\n"
-            "  The async batch endpoint did not preserve input ordering.\n"
-            f"  {len(mismatches)} position(s) out of order:\n"
-            f"{details}\n\n"
-            "  Root cause: worker pool size on CI (2) differs from local (8).\n"
-            "  The test assumes deterministic ordering but the batch handler\n"
-            "  does not guarantee it — results are emitted as soon as each\n"
-            "  worker finishes, not in submission order.\n\n"
-            "  This test has failed on CI 3 out of the last 10 runs (flaky).\n"
-            "  Fix: sort results by request ID before asserting, or add an\n"
-            "  order-preserving queue in the batch handler."
-        )
+    # Real AssertionError from Python's assert machinery — no raise statement
+    assert completion_order == input_ids, (
+        f"Prediction order mismatch!\n\n"
+        f"  Expected (submission order) : {input_ids}\n"
+        f"  Got (completion order)      : {completion_order}\n\n"
+        f"  Root cause: worker threads complete in order of processing time,\n"
+        f"  not submission order.  The batch handler emits results as each\n"
+        f"  thread finishes, so faster requests overtake slower ones.\n\n"
+        f"  Fix: collect results into a pre-sized list indexed by position,\n"
+        f"  or sort by request ID before returning."
+    )
 
     print("PASS")
 
 
 def run_test_feature_cache_ttl() -> None:
-    """
-    Test: cached feature vectors must expire after the configured TTL.
-
-    Passes locally because the developer's machine has low latency to the
-    local Redis instance.  On CI the shared Redis container is under load,
-    introducing ~200 ms extra latency, causing the TTL assertion to fire
-    200 ms early.
-    """
     print("[INFO] test_feature_cache_ttl    ... ", end="", flush=True)
-    fake_sleep(0.05)
+    time.sleep(0.02)
     print("PASS")
 
 
 def run_test_db_rollback_on_error() -> None:
-    """
-    Test: database transaction is rolled back if the downstream HTTP call fails.
-    Passes reliably.
-    """
     print("[INFO] test_db_rollback_on_error ... ", end="", flush=True)
-    fake_sleep(0.02)
+    time.sleep(0.01)
     print("PASS")
 
 
@@ -103,21 +76,15 @@ def run_integration_tests() -> None:
     tests = [
         run_test_db_rollback_on_error,
         run_test_feature_cache_ttl,
-        run_test_model_prediction_order,   # this one will fail
+        run_test_model_prediction_order,   # always fails — real race condition
     ]
 
     passed = 0
-    failed = 0
-
     for test_fn in tests:
-        try:
-            test_fn()
-            passed += 1
-        except AssertionError as exc:
-            print(f"FAIL", flush=True)
-            raise
+        test_fn()
+        passed += 1
 
-    print(f"\n[INFO] Results: {passed} passed, {failed} failed.")
+    print(f"\n[INFO] Results: {passed} passed, 0 failed.")
 
 
 if __name__ == "__main__":
@@ -129,17 +96,5 @@ if __name__ == "__main__":
     print("[INFO] Runner  : 2 async workers (CI), 8 async workers (local)")
     print()
 
-    try:
-        run_integration_tests()
-        print("[INFO] Step 5 PASSED.")
-    except AssertionError as e:
-        print()
-        print("[ERROR] *** INTEGRATION TEST FAILURE (FLAKY TEST) ***", file=sys.stderr)
-        print(f"[ERROR] {e}", file=sys.stderr)
-        print(
-            "[ERROR] Step 5 FAILED: one or more integration tests produced unexpected results.",
-            file=sys.stderr,
-        )
-        print("[ERROR] Traceback (most recent call last):", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        sys.exit(1)
+    run_integration_tests()
+    print("[INFO] Step 5 PASSED.")
