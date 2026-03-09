@@ -44,7 +44,9 @@ jobs:
 
       - name: 'Simulate dependency conflict'
         id: dep_conflict_step
+        shell: bash
         run: |
+          set -o pipefail
           echo "--- ML Trainer (simulate_dep_conflict.py) ---" >> pipeline_errors.log
           python scripts/simulate_dep_conflict.py 2>&1 | tee -a pipeline_errors.log
 
