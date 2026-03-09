@@ -15,7 +15,6 @@ jobs:
   dep-conflict:
     name: Simulate Dependency Conflict
     runs-on: ubuntu-latest
-    environment: AI_API_KEY
 
     permissions:
       contents: read
